@@ -65,8 +65,18 @@ class FunctionRewardManager:
     def compute_reward(self, data: DataProto) -> Tuple[torch.Tensor, Dict[str, List[float]]]:
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
         reward_metrics = defaultdict(list)
+        
+        # Prepare lists to collect all prompts, responses and ground truths
+        prompt_strs = []
+        response_strs = []
+        ground_truths = []
+        valid_lengths = []
+        
+        # First pass to collect all prompts, responses and ground truths
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
+            
+            # Get and decode response
             response_ids = data_item.batch["responses"]
             response_mask = data_item.batch["response_mask"]
             valid_response_length = response_mask.sum()
@@ -76,9 +86,19 @@ class FunctionRewardManager:
                 valid_response_ids, skip_special_tokens=self.config.skip_special_tokens
             )
             ground_truth = data_item.non_tensor_batch["ground_truth"]
-
-            score = self.reward_fn(response_str, ground_truth)
-            reward_tensor[i, valid_response_length - 1] = score["overall"]
+            prompt_str = data_item.non_tensor_batch["prompt"]
+            
+            prompt_strs.append(prompt_str)
+            response_strs.append(response_str)
+            ground_truths.append(ground_truth)
+            valid_lengths.append(valid_response_length)
+        
+        # Call score_fn with all prompts, responses and ground truths at once
+        scores = self.reward_fn(prompt_strs, response_strs, ground_truths)
+        
+        # Second pass to populate reward_tensor and reward_metrics
+        for i, score in enumerate(scores):
+            reward_tensor[i, valid_lengths[i] - 1] = score["overall"]
             for key, value in score.items():
                 reward_metrics[key].append(value)
 
