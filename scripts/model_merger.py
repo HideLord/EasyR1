@@ -1,17 +1,3 @@
-# Copyright 2024 Bytedance Ltd. and/or its affiliates
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 import argparse
 import os
 import re
@@ -56,83 +42,92 @@ if __name__ == "__main__":
     state_dict = torch.load(
         os.path.join(local_dir, f"model_world_size_{world_size}_rank_{rank}.pt"), map_location="cpu"
     )
+    
+    # Check if we're dealing with DTensor or regular Tensor
     pivot_key = sorted(state_dict.keys())[0]
     weight = state_dict[pivot_key]
-    assert isinstance(weight, torch.distributed._tensor.DTensor)
-    # get sharding info
-    device_mesh = weight.device_mesh
-    mesh = device_mesh.mesh
-    mesh_dim_names = device_mesh.mesh_dim_names
+    is_distributed = isinstance(weight, torch.distributed._tensor.DTensor)
+    
+    if is_distributed:
+        # Original DTensor handling logic
+        device_mesh = weight.device_mesh
+        mesh = device_mesh.mesh
+        mesh_dim_names = device_mesh.mesh_dim_names
 
-    print(f"Got device mesh {mesh}, mesh_dim_names {mesh_dim_names}")
+        print(f"Got device mesh {mesh}, mesh_dim_names {mesh_dim_names}")
 
-    assert mesh_dim_names in (("fsdp",), ("ddp", "fsdp")), f"Unsupported mesh_dim_names {mesh_dim_names}"
+        assert mesh_dim_names in (("fsdp",), ("ddp", "fsdp")), f"Unsupported mesh_dim_names {mesh_dim_names}"
 
-    if "tp" in mesh_dim_names:
-        # fsdp * tp
-        total_shards = mesh.shape[-1] * mesh.shape[-2]
-        mesh_shape = (mesh.shape[-2], mesh.shape[-1])
-    else:
-        # fsdp
-        total_shards = mesh.shape[-1]
-        mesh_shape = (mesh.shape[-1],)
-
-    print(f"Processing model shards with {total_shards} {mesh_shape} in total")
-
-    model_state_dict_lst = []
-    model_state_dict_lst.append(state_dict)
-    model_state_dict_lst.extend([""] * (total_shards - 1))
-
-    def process_one_shard(rank):
-        model_path = os.path.join(local_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
-        state_dict = torch.load(model_path, map_location="cpu", weights_only=False)
-        model_state_dict_lst[rank] = state_dict
-        return state_dict
-
-    with ThreadPoolExecutor(max_workers=min(32, os.cpu_count())) as executor:
-        for rank in range(1, total_shards):
-            executor.submit(process_one_shard, rank)
-    state_dict = {}
-    param_placements: Dict[str, List[Placement]] = {}
-    keys = set(model_state_dict_lst[0].keys())
-    for key in keys:
-        state_dict[key] = []
-        for model_state_dict in model_state_dict_lst:
-            try:
-                tensor = model_state_dict.pop(key)
-            except Exception:
-                print("-" * 30)
-                print(model_state_dict)
-            if isinstance(tensor, DTensor):
-                state_dict[key].append(tensor._local_tensor.bfloat16())
-                placements = tuple(tensor.placements)
-                # replicated placement at ddp dimension can be discarded
-                if mesh_dim_names[0] == "ddp":
-                    placements = placements[1:]
-
-                if key not in param_placements:
-                    param_placements[key] = placements
-                else:
-                    assert param_placements[key] == placements
-            else:
-                state_dict[key] = tensor.bfloat16()
-
-    del model_state_dict_lst
-
-    for key in sorted(state_dict):
-        if not isinstance(state_dict[key], list):
-            print(f"No need to merge key {key}")
-            continue
-        # merge shards
-        placements: Tuple[Shard] = param_placements[key]
-        if len(mesh_shape) == 1:
-            # 1-D list, FSDP without TP
-            assert len(placements) == 1
-            shards = state_dict[key]
-            state_dict[key] = merge_by_placement(shards, placements[0])
+        if "tp" in mesh_dim_names:
+            # fsdp * tp
+            total_shards = mesh.shape[-1] * mesh.shape[-2]
+            mesh_shape = (mesh.shape[-2], mesh.shape[-1])
         else:
-            # 2-D list, FSDP + TP
-            raise NotImplementedError("FSDP + TP is not supported yet")
+            # fsdp
+            total_shards = mesh.shape[-1]
+            mesh_shape = (mesh.shape[-1],)
+
+        print(f"Processing model shards with {total_shards} {mesh_shape} in total")
+
+        model_state_dict_lst = []
+        model_state_dict_lst.append(state_dict)
+        model_state_dict_lst.extend([""] * (total_shards - 1))
+
+        def process_one_shard(rank):
+            model_path = os.path.join(local_dir, f"model_world_size_{world_size}_rank_{rank}.pt")
+            state_dict = torch.load(model_path, map_location="cpu", weights_only=False)
+            model_state_dict_lst[rank] = state_dict
+            return state_dict
+
+        with ThreadPoolExecutor(max_workers=min(32, os.cpu_count())) as executor:
+            for rank in range(1, total_shards):
+                executor.submit(process_one_shard, rank)
+                
+        merged_state_dict = {}
+        param_placements: Dict[str, List[Placement]] = {}
+        keys = set(model_state_dict_lst[0].keys())
+        for key in keys:
+            merged_state_dict[key] = []
+            for model_state_dict in model_state_dict_lst:
+                try:
+                    tensor = model_state_dict.pop(key)
+                except Exception:
+                    print("-" * 30)
+                    print(model_state_dict)
+                if isinstance(tensor, DTensor):
+                    merged_state_dict[key].append(tensor._local_tensor.bfloat16())
+                    placements = tuple(tensor.placements)
+                    # replicated placement at ddp dimension can be discarded
+                    if mesh_dim_names[0] == "ddp":
+                        placements = placements[1:]
+
+                    if key not in param_placements:
+                        param_placements[key] = placements
+                    else:
+                        assert param_placements[key] == placements
+                else:
+                    merged_state_dict[key] = tensor.bfloat16()
+
+        del model_state_dict_lst
+
+        for key in sorted(merged_state_dict):
+            if not isinstance(merged_state_dict[key], list):
+                print(f"No need to merge key {key}")
+                continue
+            # merge shards
+            placements: Tuple[Shard] = param_placements[key]
+            if len(mesh_shape) == 1:
+                # 1-D list, FSDP without TP
+                assert len(placements) == 1
+                shards = merged_state_dict[key]
+                merged_state_dict[key] = merge_by_placement(shards, placements[0])
+            else:
+                # 2-D list, FSDP + TP
+                raise NotImplementedError("FSDP + TP is not supported yet")
+    else:
+        # Single GPU case - just use the state dict as is
+        print("Detected single GPU training (no DTensor). Using state dict directly.")
+        merged_state_dict = {k: v.bfloat16() if v.dtype != torch.bfloat16 else v for k, v in state_dict.items()}
 
     print("Writing to local disk")
     hf_path = os.path.join(local_dir, "huggingface")
@@ -153,8 +148,8 @@ if __name__ == "__main__":
     model.to_empty(device="cpu")
 
     print(f"Saving model to {hf_path}")
-    model.save_pretrained(hf_path, state_dict=state_dict)
-    del state_dict
+    model.save_pretrained(hf_path, state_dict=merged_state_dict)
+    del merged_state_dict
     del model
     if args.hf_upload_path:
         # Push to hugging face

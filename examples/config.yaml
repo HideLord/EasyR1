@@ -8,8 +8,8 @@ data:
   max_response_length: 2048
   rollout_batch_size: 512
   val_batch_size: -1
-  format_prompt: ./examples/format_prompt/math_format.jinja
-  shuffle: true
+  format_prompt: ./examples/format_prompt/story_format.jinja
+  shuffle: false
   seed: 1
   max_pixels: 4194304
   min_pixels: 262144
@@ -58,7 +58,7 @@ worker:
     tensor_parallel_size: 2
     limit_images: 0
     val_override_config:
-      temperature: 0.5
+      temperature: 0.0
       n: 1
 
   ref:
@@ -71,7 +71,7 @@ worker:
 
   reward:
     reward_type: function
-    score_function: ./examples/score_function/math.py:compute_score
+    score_function: ./examples/score_function/story_rate.py:compute_score
 
 trainer:
   total_episodes: 15
