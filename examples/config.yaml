@@ -8,8 +8,8 @@ data:
   max_response_length: 2048
   rollout_batch_size: 512
   val_batch_size: 1024
-  format_prompt: ./examples/format_prompt/math_format.jinja
-  shuffle: true
+  format_prompt: ./examples/format_prompt/story_format.jinja
+  shuffle: false
   seed: 1
   max_pixels: 4194304
   min_pixels: 262144
@@ -20,7 +20,7 @@ algorithm:
   disable_kl: false
   use_kl_loss: true
   kl_penalty: low_var_kl
-  kl_coef: 1.0e-2
+  kl_coef: 1.0e-3
 
 worker:
   actor:
@@ -36,7 +36,7 @@ worker:
       trust_remote_code: false
       freeze_vision_tower: false
     optim:
-      lr: 1.0e-6
+      lr: 1.5e-6
       weight_decay: 1.0e-2
       strategy: adamw  # {adamw, adamw_bf16}
       lr_warmup_ratio: 0.0
@@ -50,7 +50,7 @@ worker:
 
   rollout:
     n: 5
-    temperature: 1.0
+    temperature: 0.8
     top_p: 0.99
     gpu_memory_utilization: 0.6
     enforce_eager: false
@@ -58,7 +58,7 @@ worker:
     tensor_parallel_size: 2
     limit_images: 0
     val_override_config:
-      temperature: 0.5
+      temperature: 0.0
       n: 1
 
   ref:
@@ -71,10 +71,10 @@ worker:
 
   reward:
     reward_type: function
-    reward_function: ./examples/reward_function/math.py:compute_score
+    reward_function: ./examples/score_function/story.py:compute_score
 
 trainer:
-  total_episodes: 15
+  total_episodes: 3
   logger: ["console", "wandb"]
   project_name: easy_r1
   experiment_name: qwen2_5_7b_math_grpo
@@ -87,4 +87,4 @@ trainer:
   save_freq: 5  # -1 to disable
   save_limit: 3  # -1 to disable
   save_checkpoint_path: null
-  load_checkpoint_path: null
+  load_checkpoint_path: /home/hidelord/EasyR1/checkpoints/easy_r1/story_engagement_rate/global_step_85/
